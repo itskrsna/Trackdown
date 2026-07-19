@@ -1,0 +1,27 @@
+# Sentry SDK compatibility matrix
+
+Trackdown implements the Sentry envelope wire protocol so existing Sentry SDKs work without modification. This page tracks what's verified working today — updated honestly as coverage grows, including known gaps. "Verified" means: driven by the real SDK (not a hand-built request) against a running Trackdown instance — both in automated tests (see `internal/ingest/sdk_compat_test.go`, `internal/ingest/sentrygo_e2e_test.go`, `internal/protocol/envelope_test.go`, and the fixture generators under `tools/genfixtures*`) and, for the initial verification of each SDK, against the actual compiled `trackdown.exe` binary (see `tools/e2echeck*`).
+
+| SDK | Version tested | Basic error capture | Chained exception | Message capture | Stack traces | Gzip transport | Breadcrumbs | Tags | Sourcemap symbolication |
+|---|---|---|---|---|---|---|---|---|---|
+| `sentry-go` | v0.48.0 | ✅ verified | ✅ verified | ✅ verified | ✅ verified (via `Exception[].Stacktrace` and `Threads[].Stacktrace`) | n/a (doesn't compress) | not yet verified | not yet verified | n/a (Go has no sourcemaps) |
+| `@sentry/node` | v10.66.0 | ✅ verified | not yet verified (see note below) | ✅ verified | ✅ verified, incl. in-app vs. library frame distinction | n/a (doesn't compress by default) | not yet verified | not yet verified | not yet implemented — traces show minified positions |
+| `sentry-sdk` (Python) | v2.66.0 | ✅ verified | ✅ verified | ✅ verified | ✅ verified | ✅ verified — **required**, see below | not yet verified | not yet verified | n/a (Python has no sourcemaps) |
+
+## Required client-side compatibility notes (things a self-hoster or SDK user needs to know)
+
+- **JS and Python SDKs require a *numeric* project ID in the DSN.** `@sentry/node` and `sentry-sdk` (Python) both validate the DSN client-side and reject a non-numeric project-id path segment with a hard error (`Invalid Sentry Dsn: Invalid projectId ...` / `BadDsn: Invalid project in DSN`) — confirmed directly against both SDKs, not inferred from docs. `sentry-go` has no such restriction and accepts an arbitrary string. **Trackdown itself treats project IDs as opaque strings and has no numeric requirement** — but if you're using the JS or Python SDK, choose a numeric project ID (e.g. `12345`) when setting up a project, or those SDKs will refuse to initialize at all.
+- **`sentry-sdk` (Python) gzip-compresses every envelope by default, with no size threshold** (confirmed by reading its `transport.py` directly — `compresslevel=9`, unconditional unless a caller explicitly disables it). Trackdown's ingest endpoint decompresses `Content-Encoding: gzip` bodies (see `internal/ingest/ingest.go`'s `readEnvelopeBody`) — this was a real gap found and fixed during verification, not a hypothetical: **before this fix, every Python SDK event would have silently failed to parse.** `Content-Encoding: br` (Brotli) is explicitly rejected with a `400` (not supported); only `gzip` and no encoding are handled today.
+
+## Known gaps (honest, as of this writing)
+
+- Only envelope items of `type: "event"` are persisted. Attachments, transactions, sessions, and client reports are accepted (the envelope isn't rejected) but silently dropped.
+- The legacy `/api/{id}/store/` endpoint (used by older SDK versions) is not implemented — only the modern `/envelope/` endpoint.
+- **Envelope wire-format variance across SDKs, all confirmed and handled:**
+  - `sentry-go` sends `exception` and `breadcrumbs` as **bare JSON arrays**; `@sentry/node` and `sentry-sdk` (Python) both send them **wrapped as `{"values": [...]}`**. Trackdown's parser (`internal/protocol/event.go`) accepts both shapes.
+  - Item headers: `sentry-go` and `sentry-sdk` (Python) always send an explicit `length` on the event item; `@sentry/node` does not (implicit-length item, ending at the next newline). Both forms are handled.
+  - Timestamps: `sentry-go` and `@sentry/node` send a numeric Unix timestamp (with fractional seconds); `sentry-sdk` (Python) sends an ISO8601 string. Both forms are handled.
+  - Envelope header `sdk` field: present for `sentry-go` and `@sentry/node`; **absent** for `sentry-sdk` (Python) — Python only puts SDK info on the event payload itself, not the envelope header. Code that wants SDK identity must read it from the event, not assume it's always on the envelope header.
+- **`@sentry/node` chained-exception (`Error(..., { cause })`) linking has not actually been verified** — the fixture-capture script disabled `defaultIntegrations` (including the `LinkedErrors` integration that walks `.cause`) for a leaner, more deterministic capture, so the captured fixture only has one exception entry despite being constructed with a cause. `sentry-go` and Python's chained-exception behavior (`raise X from Y`) **are** verified with real 2-entry chains. This is a real, narrow gap, not a documentation oversight — treat Node cause-chaining as unverified until a fixture is captured with default integrations enabled.
+- Breadcrumbs and tags have parser support (`internal/protocol/event.go`'s `BreadcrumbList`/`Tags` types, both dual-form) but no SDK has been verified actually sending them yet — none of the fixture-capture scripts add breadcrumbs or tags to the events they emit.
+- JS sourcemap symbolication is not implemented. `@sentry/node` stack traces render with minified line/column positions rather than original source locations — an honest, shippable state, not a bug: resolving this is explicitly deferred past this v1 .

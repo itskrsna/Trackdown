@@ -1,0 +1,39 @@
+# Claude context — Kishore's IP, never pushed
+CLAUDE.md
+.claude-context/
+
+# Go
+/trackdown
+/trackdown.exe
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/dist/
+
+# Local runtime data
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+trackdown.yml
+trackdown.local.*
+
+# Node/Python dev tooling (tools/genfixtures-node, tools/genfixtures-python, tools/e2echeck-*)
+node_modules/
+package-lock.json
+.venv/
+__pycache__/
+*.pyc
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code project data (session artifacts, workflows, local settings) — never pushed
+.claude/

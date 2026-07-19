@@ -1,0 +1,63 @@
+version: 2
+
+project_name: trackdown
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: trackdown
+    main: ./cmd/trackdown
+    binary: trackdown
+    # Pure Go, no CGO -- the entire reason modernc.org/sqlite was chosen
+    # over a CGO-based SQLite driver was to make single-command
+    # cross-compilation like this trivial.
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: trackdown-archive
+    ids:
+      - trackdown
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+      - docs/**
+
+checksum:
+  name_template: "checksums.txt"
+
+# Explicitly disabled: goreleaser defaults to a GitHub release target even
+# with no release: section at all, which fails validation without a git
+# remote -- and this repo intentionally has none yet (private, no push,
+# per standing project policy). This must stay disabled until a future,
+# explicit decision to launch publicly changes that.
+release:
+  disable: true
+
+# Release/publish steps are intentionally NOT configured here (no GitHub
+# release integration, no tag pushing) -- this repo stays private until an
+# explicit future decision to launch publicly. Every invocation of this
+# config must be `goreleaser release --snapshot --clean` (or `build
+# --snapshot --clean`), which never touches a remote, never creates a git
+# tag, and never publishes anything. Do not add a `release:` section or run
+# a non-snapshot release until that decision has actually been made.

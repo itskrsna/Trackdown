@@ -13,8 +13,8 @@ test:
 	go test ./...
 
 # Go's race detector needs CGO even for a pure-Go project like this one --
-# see CLAUDE.md for why. CI's Linux/macOS runners have a C compiler
-# preinstalled; on Windows you'll need one too (see CLAUDE.md).
+# . CI's Linux/macOS runners have a C compiler
+# preinstalled; on Windows you'll need one too.
 race-test:
 	CGO_ENABLED=1 go test -race ./...
 

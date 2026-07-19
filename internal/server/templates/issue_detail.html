@@ -1,0 +1,28 @@
+{{define "content"}}
+<p><a href="/projects/{{.ProjectID}}/issues/">&larr; Back to issues</a></p>
+<h1>{{.Title}}</h1>
+<p>
+	<span class="{{statusBadgeClass .Status}}">{{.Status}}</span>
+	&middot; {{.EventCount}} event{{if ne .EventCount 1}}s{{end}}
+	&middot; first seen {{relTime .FirstSeen}}
+	&middot; last seen {{relTime .LastSeen}}
+</p>
+<p class="muted">Fingerprint: <code>{{.Fingerprint}}</code></p>
+
+<div class="actions">
+	{{if ne .Status "resolved"}}<form method="post" action="/projects/{{.ProjectID}}/issues/{{.ID}}/resolve"><button type="submit">Resolve</button></form>{{end}}
+	{{if ne .Status "ignored"}}<form method="post" action="/projects/{{.ProjectID}}/issues/{{.ID}}/ignore"><button type="submit">Ignore</button></form>{{end}}
+	{{if ne .Status "unresolved"}}<form method="post" action="/projects/{{.ProjectID}}/issues/{{.ID}}/reopen"><button type="submit">Reopen</button></form>{{end}}
+</div>
+
+<h2>Events</h2>
+{{if not .Events}}
+<p class="empty-state">No events.</p>
+{{else}}
+<ul class="event-list">
+	{{range .Events}}
+	<li><a href="/projects/{{$.ProjectID}}/events/{{.EventID}}">{{.EventID}}</a> <span class="muted">{{relTime .ReceivedAt}} &middot; {{.Level}} &middot; {{.Platform}}</span></li>
+	{{end}}
+</ul>
+{{end}}
+{{end}}

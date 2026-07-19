@@ -1,0 +1,3 @@
+{"event_id":"9eb7953776e04e7aa0e0be3c8d551613","sent_at":"2026-07-19T15:23:22.865Z","sdk":{"name":"sentry.javascript.node","version":"10.66.0"},"trace":{"environment":"production","public_key":"public","trace_id":"2a94f41930b741f08f79134419d2d6a1"}}
+{"type":"event"}
+{"event_id":"9eb7953776e04e7aa0e0be3c8d551613","level":"info","message":"hello from trackdown fixture generator","platform":"node","contexts":{"trace":{"trace_id":"2a94f41930b741f08f79134419d2d6a1","span_id":"947830a92f7dbafd"},"runtime":{"name":"node","version":"v20.19.3"}},"server_name":"INSPOLT407","timestamp":1784474602.865,"environment":"production","sdk":{"name":"sentry.javascript.node","version":"10.66.0","integrations":[],"packages":[{"name":"npm:@sentry/node","version":"10.66.0"}]}}

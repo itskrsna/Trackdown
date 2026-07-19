@@ -1,0 +1,12 @@
+{{define "content"}}
+<h1>Projects</h1>
+{{if not .Projects}}
+<p class="empty-state">No projects yet. Point any Sentry SDK's DSN at this server — a project appears automatically the moment it sends its first event.</p>
+{{else}}
+<ul class="project-list">
+	{{range .Projects}}
+	<li><a href="/projects/{{.ID}}/issues/">{{.ID}}</a> <span class="muted">created {{relTime .CreatedAt}}</span> &middot; <a href="/projects/{{.ID}}/setup">setup</a></li>
+	{{end}}
+</ul>
+{{end}}
+{{end}}

@@ -1,0 +1,23 @@
+{{define "content"}}
+<p><a href="/projects/{{.ProjectID}}/issues/">&larr; Back to issues</a></p>
+<h1>Project setup: {{.ProjectID}}</h1>
+<p>Point any Sentry SDK at this DSN:</p>
+<pre class="dsn"><code>{{.DSN}}</code></pre>
+
+<h2>Go (sentry-go)</h2>
+<pre><code>sentry.Init(sentry.ClientOptions{
+    Dsn: "{{.DSN}}",
+})</code></pre>
+
+<h2>Node.js (@sentry/node)</h2>
+<pre><code>Sentry.init({
+  dsn: "{{.DSN}}",
+});</code></pre>
+<p class="muted">Note: @sentry/node requires a numeric project ID in the DSN.</p>
+
+<h2>Python (sentry-sdk)</h2>
+<pre><code>sentry_sdk.init(
+    dsn="{{.DSN}}",
+)</code></pre>
+<p class="muted">Note: sentry-sdk requires a numeric project ID in the DSN, and gzip-compresses envelopes by default (Trackdown handles this automatically).</p>
+{{end}}

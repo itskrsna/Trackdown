@@ -1,0 +1,59 @@
+{{define "content"}}
+<p><a href="/projects/{{.ProjectID}}/issues/">&larr; Back to issues</a></p>
+<h1>Event {{.Stored.EventID}}</h1>
+<p class="muted">{{fmtTime .Stored.ReceivedAt}} &middot; {{.Stored.Level}} &middot; {{.Stored.Platform}}</p>
+
+{{if .Event.Exception}}
+<h2>Exception</h2>
+{{range .Event.Exception}}
+<div class="exception">
+	<h3>{{.Type}}{{if .Value}}: {{.Value}}{{end}}</h3>
+	{{if .Stacktrace}}
+	<ol class="stacktrace">
+		{{range .Stacktrace.Frames}}
+		<li class="{{frameClass .}}">
+			<span class="frame-location">{{.Module}} in {{.Function}}</span>
+			{{if .Filename}}<span class="frame-file">{{.Filename}}:{{.Lineno}}</span>{{end}}
+			{{if .ContextLine}}<pre class="frame-context">{{.ContextLine}}</pre>{{end}}
+		</li>
+		{{end}}
+	</ol>
+	{{end}}
+</div>
+{{end}}
+{{end}}
+
+{{if .Event.Message.Formatted}}
+<h2>Message</h2>
+<p>{{.Event.Message.Formatted}}</p>
+{{end}}
+
+{{if .Event.Breadcrumbs}}
+<h2>Breadcrumbs</h2>
+<table class="breadcrumb-table">
+	<thead><tr><th>Time</th><th>Category</th><th>Level</th><th>Message</th></tr></thead>
+	<tbody>
+	{{range .Event.Breadcrumbs}}
+		<tr><td>{{fmtTime .Timestamp.Time}}</td><td>{{.Category}}</td><td>{{.Level}}</td><td>{{.Message}}</td></tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+
+{{if .Event.Tags}}
+<h2>Tags</h2>
+<table class="tags-table">
+	<tbody>
+	{{$tags := .Event.Tags}}
+	{{range sortedTagKeys .Event.Tags}}
+		<tr><td>{{.}}</td><td>{{index $tags .}}</td></tr>
+	{{end}}
+	</tbody>
+</table>
+{{end}}
+
+<details class="raw-json">
+	<summary>Raw JSON</summary>
+	<pre>{{.RawJSON}}</pre>
+</details>
+{{end}}

@@ -1,0 +1,38 @@
+{{define "content"}}
+<h1>Issues: {{.ProjectID}}</h1>
+
+<nav class="filter-tabs">
+	<a href="?status=unresolved" class="{{if eq .Status "unresolved"}}active{{end}}">Unresolved ({{index .Counts "unresolved"}})</a>
+	<a href="?status=resolved" class="{{if eq .Status "resolved"}}active{{end}}">Resolved ({{index .Counts "resolved"}})</a>
+	<a href="?status=ignored" class="{{if eq .Status "ignored"}}active{{end}}">Ignored ({{index .Counts "ignored"}})</a>
+	<a href="?status=all" class="{{if eq .Status "all"}}active{{end}}">All</a>
+</nav>
+
+{{if not .Issues}}
+<p class="empty-state">No issues in this view.</p>
+{{else}}
+<table class="issue-table">
+	<thead>
+		<tr><th>Title</th><th>Level</th><th>Events</th><th>First seen</th><th>Last seen</th><th>Actions</th></tr>
+	</thead>
+	<tbody>
+		{{range .Issues}}
+		<tr>
+			<td><a href="/projects/{{$.ProjectID}}/issues/{{.ID}}">{{.Title}}</a> <span class="{{statusBadgeClass .Status}}">{{.Status}}</span></td>
+			<td>{{.Level}}</td>
+			<td>{{.EventCount}}</td>
+			<td title="{{fmtTime .FirstSeen}}">{{relTime .FirstSeen}}</td>
+			<td title="{{fmtTime .LastSeen}}">{{relTime .LastSeen}}</td>
+			<td class="actions">
+				{{if ne .Status "resolved"}}<form method="post" action="/projects/{{$.ProjectID}}/issues/{{.ID}}/resolve"><button type="submit">Resolve</button></form>{{end}}
+				{{if ne .Status "ignored"}}<form method="post" action="/projects/{{$.ProjectID}}/issues/{{.ID}}/ignore"><button type="submit">Ignore</button></form>{{end}}
+				{{if ne .Status "unresolved"}}<form method="post" action="/projects/{{$.ProjectID}}/issues/{{.ID}}/reopen"><button type="submit">Reopen</button></form>{{end}}
+			</td>
+		</tr>
+		{{end}}
+	</tbody>
+</table>
+{{end}}
+
+<p><a href="/projects/{{.ProjectID}}/setup">Setup instructions</a></p>
+{{end}}

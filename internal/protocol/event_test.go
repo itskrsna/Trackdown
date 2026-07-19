@@ -65,6 +65,25 @@ func TestTimestamp_UnmarshalJSON(t *testing.T) {
 	}
 }
 
+// TestTimestamp_UnmarshalJSON_NormalizesToUTC guards against a real bug: Go's
+// time.Parse substitutes the named Local zone when a parsed numeric offset
+// happens to equal the process's own Local offset (e.g. "+05:30" resolves to
+// named "IST" on a machine whose Local zone is IST), but falls back to an
+// unnamed fixed zone everywhere else. modernc.org/sqlite's default time
+// round-trip can only re-parse the named form, so this passed in local dev
+// (coincidentally IST) and failed in CI (UTC runners) until Timestamp started
+// normalizing to UTC. Using an offset no real IANA zone has (+23:00) means
+// this can never coincidentally pass regardless of what machine runs it.
+func TestTimestamp_UnmarshalJSON_NormalizesToUTC(t *testing.T) {
+	var ts Timestamp
+	if err := json.Unmarshal([]byte(`"2026-07-19T05:51:16.322296+23:00"`), &ts); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if ts.Time.Location() != time.UTC {
+		t.Fatalf("Location = %v, want time.UTC", ts.Time.Location())
+	}
+}
+
 func TestMessage_UnmarshalJSON(t *testing.T) {
 	t.Run("string form", func(t *testing.T) {
 		var m Message

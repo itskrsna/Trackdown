@@ -1,0 +1,9 @@
+{
+  "name": "trackdown-genfixtures-node",
+  "private": true,
+  "description": "Captures real envelope bytes from @sentry/node for Trackdown's protocol conformance tests. Not part of the shipped product.",
+  "type": "commonjs",
+  "dependencies": {
+    "@sentry/node": "^10.0.0"
+  }
+}

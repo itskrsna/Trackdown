@@ -1,0 +1,9 @@
+{
+  "name": "trackdown-e2echeck-node",
+  "private": true,
+  "description": "Manual live-server verification tool using a real @sentry/node client. Not part of the shipped product.",
+  "type": "commonjs",
+  "dependencies": {
+    "@sentry/node": "^10.0.0"
+  }
+}

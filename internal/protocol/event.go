@@ -77,7 +77,15 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("parsing timestamp %q: %w", str, err)
 	}
-	t.Time = parsed
+	// .UTC() matters beyond normalization: Go's time.Parse silently swaps in
+	// the named Local zone when a numeric offset happens to match it (e.g. an
+	// SDK-emitted "+05:30" on a machine whose Local zone is IST), producing a
+	// named zone here and an unnamed fixed zone everywhere else the offset
+	// doesn't match Local. modernc.org/sqlite's default time round-trip can
+	// only re-parse the named-zone form, so an unnormalized value here works
+	// on the machine that happens to share the offset and fails everywhere
+	// else — this bit us in CI.
+	t.Time = parsed.UTC()
 	return nil
 }
 

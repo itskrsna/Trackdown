@@ -294,7 +294,12 @@ func (s *Store) SaveEvent(ctx context.Context, projectID string, ev *protocol.Ev
 
 	var ts sql.NullTime
 	if !ev.Timestamp.IsZero() {
-		ts = sql.NullTime{Time: ev.Timestamp.Time, Valid: true}
+		// .UTC() defensively, even though protocol already normalizes: the
+		// SQLite driver's default time round-trip only survives a named zone
+		// (UTC always has one; an unnormalized non-UTC offset may not).
+		// Storage shouldn't depend on every caller
+		// remembering this.
+		ts = sql.NullTime{Time: ev.Timestamp.Time.UTC(), Valid: true}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO events (project_id, issue_id, event_id, event_timestamp, level, platform, message, payload)

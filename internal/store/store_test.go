@@ -180,6 +180,13 @@ func TestSaveAndGetEvent(t *testing.T) {
 	if got.Timestamp.IsZero() {
 		t.Fatal("Timestamp is zero, want the event's parsed timestamp")
 	}
+	// This fixture's raw timestamp carries a "+05:30" offset (captured on an
+	// IST machine) — round-tripping it through SQLite must not depend on the
+	// offset coincidentally matching the test-runner's own Local zone (
+	//this is the exact scenario that broke CI).
+	if got.Timestamp.Location() != time.UTC {
+		t.Fatalf("Timestamp.Location() = %v, want time.UTC", got.Timestamp.Location())
+	}
 	if len(got.Payload) != len(raw) {
 		t.Fatalf("stored payload length = %d, want %d (original bytes preserved)", len(got.Payload), len(raw))
 	}

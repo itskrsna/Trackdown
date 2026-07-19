@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -257,6 +258,198 @@ func TestParseEvent_RealPythonException_ChainedCause(t *testing.T) {
 	}
 	if outer.Type != "RuntimeError" || outer.Value != "outer failure" {
 		t.Fatalf("Exception[1] = %+v, want the outer RuntimeError", outer)
+	}
+}
+
+// TestParseEnvelope_RealDotNetFixtures exercises real Sentry .NET SDK
+// output. Like sentry-sdk (Python), the .NET SDK gzip-compresses envelope
+// bodies by default (confirmed against a real captured fixture) — decoding
+// that is an HTTP/Content-Encoding concern handled in internal/ingest, so
+// these tests use the ".decompressed.envelope" siblings
+// tools/genfixtures-dotnet writes alongside the real compressed wire bytes.
+func TestParseEnvelope_RealDotNetFixtures(t *testing.T) {
+	tests := []struct {
+		fixture   string
+		wantLevel string
+	}{
+		{"sentry-dotnet-exception.decompressed.envelope", "error"},
+		{"sentry-dotnet-message.decompressed.envelope", "info"},
+		{"sentry-dotnet-unhandled.decompressed.envelope", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			data := readFixture(t, tt.fixture)
+
+			env, err := ParseEnvelope(data)
+			if err != nil {
+				t.Fatalf("ParseEnvelope: %v", err)
+			}
+			if env.Header.SDK == nil || env.Header.SDK.Name != "sentry.dotnet" {
+				t.Fatalf("envelope header SDK = %+v, want name sentry.dotnet", env.Header.SDK)
+			}
+			if len(env.Items) != 1 {
+				t.Fatalf("len(Items) = %d, want 1", len(env.Items))
+			}
+
+			ev, err := ParseEvent(env.Items[0].Payload)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.EventID != env.Header.EventID {
+				t.Fatalf("event_id mismatch: envelope=%s event=%s", env.Header.EventID, ev.EventID)
+			}
+			if ev.Level != tt.wantLevel {
+				t.Fatalf("Level = %q, want %q", ev.Level, tt.wantLevel)
+			}
+			if ev.Platform != "csharp" {
+				t.Fatalf("Platform = %q, want csharp", ev.Platform)
+			}
+			if ev.Timestamp.IsZero() {
+				t.Fatal("Timestamp is zero, expected a parsed time")
+			}
+		})
+	}
+}
+
+// TestParseEvent_RealDotNetException_ChainedCause also confirms real stack
+// frames are present — constructing a .NET Exception without throwing it
+// never populates a stack trace, a real gotcha tools/genfixtures-dotnet had
+// to work around (throw/catch, not just `new Exception(...)`).
+func TestParseEvent_RealDotNetException_ChainedCause(t *testing.T) {
+	data := readFixture(t, "sentry-dotnet-exception.decompressed.envelope")
+	env, err := ParseEnvelope(data)
+	if err != nil {
+		t.Fatalf("ParseEnvelope: %v", err)
+	}
+	ev, err := ParseEvent(env.Items[0].Payload)
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if len(ev.Exception) != 2 {
+		t.Fatalf("len(Exception) = %d, want 2 (chained: inner cause + outer wrap)", len(ev.Exception))
+	}
+	inner, outer := ev.Exception[0], ev.Exception[1]
+	if inner.Value != "inner cause" || outer.Value != "outer failure" {
+		t.Fatalf("Exception = %+v, %+v", inner, outer)
+	}
+	if inner.Stacktrace == nil || len(inner.Stacktrace.Frames) == 0 {
+		t.Fatal("expected a non-empty stacktrace on the inner exception")
+	}
+}
+
+// TestParseEvent_RealDotNetMessage_UsesLogEntry pins down the one genuinely
+// SDK-specific quirk found in the .NET SDK: it sends captured message text
+// under "logentry", not the top-level "message" field sentry-go/node/python
+// all use. ParseEvent normalizes this — this test proves the normalization,
+// not just the raw wire format.
+func TestParseEvent_RealDotNetMessage_UsesLogEntry(t *testing.T) {
+	data := readFixture(t, "sentry-dotnet-message.decompressed.envelope")
+	env, err := ParseEnvelope(data)
+	if err != nil {
+		t.Fatalf("ParseEnvelope: %v", err)
+	}
+	ev, err := ParseEvent(env.Items[0].Payload)
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if got := ev.Message.String(); got != "hello from trackdown fixture generator" {
+		t.Fatalf("Message.String() = %q, want the logentry-sourced text", got)
+	}
+}
+
+// TestParseEnvelope_RealJavaFixtures exercises real Sentry Java SDK output.
+// Like sentry-sdk (Python) and the .NET SDK, Java gzip-compresses envelope
+// bodies by default, so these tests use the ".decompressed.envelope"
+// siblings tools/genfixtures-java writes.
+func TestParseEnvelope_RealJavaFixtures(t *testing.T) {
+	tests := []struct {
+		fixture   string
+		wantLevel string
+	}{
+		{"sentry-java-exception.decompressed.envelope", "error"},
+		{"sentry-java-message.decompressed.envelope", "info"},
+		{"sentry-java-unhandled.decompressed.envelope", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			data := readFixture(t, tt.fixture)
+
+			env, err := ParseEnvelope(data)
+			if err != nil {
+				t.Fatalf("ParseEnvelope: %v", err)
+			}
+			if env.Header.SDK == nil || env.Header.SDK.Name != "sentry.java" {
+				t.Fatalf("envelope header SDK = %+v, want name sentry.java", env.Header.SDK)
+			}
+			if len(env.Items) != 1 {
+				t.Fatalf("len(Items) = %d, want 1", len(env.Items))
+			}
+
+			ev, err := ParseEvent(env.Items[0].Payload)
+			if err != nil {
+				t.Fatalf("ParseEvent: %v", err)
+			}
+			if ev.EventID != env.Header.EventID {
+				t.Fatalf("event_id mismatch: envelope=%s event=%s", env.Header.EventID, ev.EventID)
+			}
+			if ev.Level != tt.wantLevel {
+				t.Fatalf("Level = %q, want %q", ev.Level, tt.wantLevel)
+			}
+			if ev.Platform != "java" {
+				t.Fatalf("Platform = %q, want java", ev.Platform)
+			}
+			if ev.Timestamp.IsZero() {
+				t.Fatal("Timestamp is zero, expected a parsed time")
+			}
+		})
+	}
+}
+
+// TestParseEvent_RealJavaException_MissingLevelDefaultsToError pins down the
+// real gap this fixture surfaced: the Java SDK sends no top-level "level"
+// field at all for exception events (unlike sentry-go/node/python/.NET,
+// which all set it explicitly) — the Sentry protocol spec defaults level to
+// "error" when absent, which ParseEvent must apply itself rather than
+// silently persisting an empty level.
+func TestParseEvent_RealJavaException_MissingLevelDefaultsToError(t *testing.T) {
+	data := readFixture(t, "sentry-java-exception.decompressed.envelope")
+	if bytes.Contains(data, []byte(`"level"`)) {
+		t.Fatal(`fixture now contains a "level" field — this test needs updating, the SDK's behavior changed`)
+	}
+	env, err := ParseEnvelope(data)
+	if err != nil {
+		t.Fatalf("ParseEnvelope: %v", err)
+	}
+	ev, err := ParseEvent(env.Items[0].Payload)
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if ev.Level != "error" {
+		t.Fatalf("Level = %q, want error (the spec-documented default when absent)", ev.Level)
+	}
+}
+
+func TestParseEvent_RealJavaException_ChainedCause(t *testing.T) {
+	data := readFixture(t, "sentry-java-exception.decompressed.envelope")
+	env, err := ParseEnvelope(data)
+	if err != nil {
+		t.Fatalf("ParseEnvelope: %v", err)
+	}
+	ev, err := ParseEvent(env.Items[0].Payload)
+	if err != nil {
+		t.Fatalf("ParseEvent: %v", err)
+	}
+	if len(ev.Exception) != 2 {
+		t.Fatalf("len(Exception) = %d, want 2 (chained: inner cause + outer wrap)", len(ev.Exception))
+	}
+	inner, outer := ev.Exception[0], ev.Exception[1]
+	if inner.Value != "inner cause" || outer.Value != "outer failure" {
+		t.Fatalf("Exception = %+v, %+v", inner, outer)
+	}
+	if inner.Stacktrace == nil || len(inner.Stacktrace.Frames) == 0 {
+		t.Fatal("expected a non-empty stacktrace on the inner exception")
 	}
 }
 

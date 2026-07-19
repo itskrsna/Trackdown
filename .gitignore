@@ -29,6 +29,13 @@ package-lock.json
 __pycache__/
 *.pyc
 
+# .NET/Java dev tooling (tools/genfixtures-dotnet, tools/genfixtures-java, tools/e2echeck-dotnet, tools/e2echeck-java)
+bin/
+obj/
+*.class
+tools/genfixtures-java/lib/
+tools/e2echeck-java/*.class
+
 # IDE / OS
 .vscode/
 .idea/

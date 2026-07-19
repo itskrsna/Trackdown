@@ -26,8 +26,9 @@ type Event struct {
 	Level       string          `json:"level"`
 	Logger      string          `json:"logger"`
 	Message     Message         `json:"message"`
+	LogEntry    *LogEntry       `json:"logentry"`
 	Exception   ExceptionValues `json:"exception"`
-	Threads     []Thread        `json:"threads"`
+	Threads     ThreadValues    `json:"threads"`
 	Breadcrumbs BreadcrumbList  `json:"breadcrumbs"`
 	Tags        Tags            `json:"tags"`
 	Release     string          `json:"release"`
@@ -36,12 +37,39 @@ type Event struct {
 	SDK         *SDKInfo        `json:"sdk"`
 }
 
+// LogEntry is the Sentry .NET SDK's chosen field for CaptureMessage text —
+// verified against a real captured fixture, where it's used instead of the
+// top-level "message" field that sentry-go/@sentry/node/sentry-sdk all use.
+// Both are real, current Sentry protocol field names for the same concept;
+// ParseEvent normalizes this into Event.Message so callers only ever need to
+// check one place.
+type LogEntry struct {
+	Formatted string   `json:"formatted,omitempty"`
+	Message   string   `json:"message,omitempty"`
+	Params    []string `json:"params,omitempty"`
+}
+
 // ParseEvent parses the payload of an envelope item whose Header.Type is
 // "event".
 func ParseEvent(payload []byte) (*Event, error) {
 	var ev Event
 	if err := json.Unmarshal(payload, &ev); err != nil {
 		return nil, fmt.Errorf("parsing event payload: %w", err)
+	}
+	if ev.Message.String() == "" && ev.LogEntry != nil {
+		ev.Message = Message{
+			Formatted: ev.LogEntry.Formatted,
+			Raw:       ev.LogEntry.Message,
+			Params:    ev.LogEntry.Params,
+		}
+	}
+	if ev.Level == "" {
+		// Per the Sentry protocol spec, "level" defaults to "error" when
+		// absent. sentry-go/@sentry/node/sentry-sdk/.NET all set it
+		// explicitly, but the Java SDK omits it entirely for exception
+		// events (confirmed against a real captured fixture) — without this,
+		// those events would silently store an empty level.
+		ev.Level = "error"
 	}
 	return &ev, nil
 }
@@ -94,6 +122,31 @@ func (t Timestamp) MarshalJSON() ([]byte, error) {
 		return []byte("null"), nil
 	}
 	return json.Marshal(t.Time.Format(time.RFC3339Nano))
+}
+
+// FlexString accepts a JSON value sent as either a string or a number,
+// storing either as its string form. The Sentry protocol spec allows thread
+// "id" to be either (a numeric OS/managed thread ID or a string label) — the
+// Sentry .NET SDK sends a real numeric managed thread ID where sentry-go
+// sends a string, confirmed against real captured fixtures.
+type FlexString string
+
+func (s *FlexString) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" {
+		*s = ""
+		return nil
+	}
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		var str string
+		if err := json.Unmarshal(data, &str); err != nil {
+			return fmt.Errorf("parsing string-form value: %w", err)
+		}
+		*s = FlexString(str)
+		return nil
+	}
+	*s = FlexString(trimmed)
+	return nil
 }
 
 // Message accepts both forms of the Sentry "message" field: a plain string,
@@ -204,11 +257,42 @@ type Stacktrace struct {
 // e.g. sentry-go's CaptureMessage and panic recovery both populate Threads
 // instead of Exception, verified against captured fixtures.
 type Thread struct {
-	ID         string      `json:"id,omitempty"`
+	ID         FlexString  `json:"id,omitempty"`
 	Name       string      `json:"name,omitempty"`
 	Stacktrace *Stacktrace `json:"stacktrace,omitempty"`
 	Crashed    bool        `json:"crashed,omitempty"`
 	Current    bool        `json:"current,omitempty"`
+}
+
+// ThreadValues accepts both forms Sentry SDKs use for the "threads" field: a
+// bare array (what sentry-go/@sentry/node/sentry-sdk all emit) or an object
+// wrapping the array in "values" (the form the Sentry .NET SDK uses,
+// matching the documented protocol shape — confirmed against a real
+// captured fixture; mirrors ExceptionValues' identical bare-vs-wrapped split).
+type ThreadValues []Thread
+
+func (t *ThreadValues) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "null" || trimmed == "" {
+		*t = nil
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var values []Thread
+		if err := json.Unmarshal(data, &values); err != nil {
+			return fmt.Errorf("parsing array-form threads: %w", err)
+		}
+		*t = values
+		return nil
+	}
+	var wrapped struct {
+		Values []Thread `json:"values"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		return fmt.Errorf("parsing object-form threads: %w", err)
+	}
+	*t = wrapped.Values
+	return nil
 }
 
 // ExceptionValue is one exception in a (possibly chained) exception group.

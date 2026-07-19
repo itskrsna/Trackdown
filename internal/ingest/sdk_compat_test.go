@@ -99,6 +99,107 @@ func TestServeEnvelope_RealPythonFixtures_Gzip(t *testing.T) {
 	}
 }
 
+// TestServeEnvelope_RealDotNetFixtures_Gzip proves two real, previously-
+// unverified things about the Sentry .NET SDK: it gzip-compresses every
+// envelope by default just like sentry-sdk (Python), and it sends captured
+// message text under "logentry" rather than the top-level "message" field
+// the other three verified SDKs use — internal/protocol.ParseEvent
+// normalizes the latter; this test is what actually proves it end-to-end.
+func TestServeEnvelope_RealDotNetFixtures_Gzip(t *testing.T) {
+	tests := []struct {
+		fixture   string
+		wantLevel string
+	}{
+		{"sentry-dotnet-exception.envelope", "error"},
+		{"sentry-dotnet-message.envelope", "info"},
+		{"sentry-dotnet-unhandled.envelope", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			srv, st := newTestServer(t)
+			envelope := loadEnvelopeFixture(t, tt.fixture) // real gzip-compressed wire bytes
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/proj1/envelope/", bytes.NewReader(envelope))
+			req.Header.Set("X-Sentry-Auth", sentryAuthHeader("public"))
+			req.Header.Set("Content-Encoding", "gzip") // what the .NET SDK actually sends
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			events, err := st.ListEvents(req.Context(), "proj1")
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("len(events) = %d, want 1", len(events))
+			}
+			if events[0].Level != tt.wantLevel || events[0].Platform != "csharp" {
+				t.Fatalf("stored event = %+v", events[0])
+			}
+		})
+	}
+}
+
+// TestServeEnvelope_RealDotNetMessageFixture_UsesLogEntry pins the exact
+// wire-format quirk down independently of the round-trip test above: the raw
+// captured .NET message fixture really does carry the text under
+// "logentry", not "message" — confirming the assertion in the test above
+// isn't passing for an unrelated reason.
+func TestServeEnvelope_RealDotNetMessageFixture_UsesLogEntry(t *testing.T) {
+	raw := string(loadEnvelopeFixture(t, "sentry-dotnet-message.decompressed.envelope"))
+	if !bytes.Contains([]byte(raw), []byte(`"logentry"`)) {
+		t.Fatal(`fixture doesn't contain "logentry" — did the .NET SDK's message wire format change?`)
+	}
+}
+
+// TestServeEnvelope_RealJavaFixtures_Gzip verifies the Sentry Java SDK.
+func TestServeEnvelope_RealJavaFixtures_Gzip(t *testing.T) {
+	tests := []struct {
+		fixture   string
+		wantLevel string
+	}{
+		{"sentry-java-exception.envelope", "error"},
+		{"sentry-java-message.envelope", "info"},
+		{"sentry-java-unhandled.envelope", "error"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.fixture, func(t *testing.T) {
+			srv, st := newTestServer(t)
+			envelope := loadEnvelopeFixture(t, tt.fixture)
+
+			req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/proj1/envelope/", bytes.NewReader(envelope))
+			req.Header.Set("X-Sentry-Auth", sentryAuthHeader("public"))
+			req.Header.Set("Content-Encoding", "gzip") // what the Java SDK actually sends
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			events, err := st.ListEvents(req.Context(), "proj1")
+			if err != nil {
+				t.Fatalf("ListEvents: %v", err)
+			}
+			if len(events) != 1 {
+				t.Fatalf("len(events) = %d, want 1", len(events))
+			}
+			if events[0].Level != tt.wantLevel || events[0].Platform != "java" {
+				t.Fatalf("stored event = %+v", events[0])
+			}
+		})
+	}
+}
+
 func TestServeEnvelope_GzipBody_WithoutContentEncodingHeader_FailsToParse(t *testing.T) {
 	// Documents the contract: decompression is driven strictly by the
 	// Content-Encoding header, not by sniffing the body. Posting real

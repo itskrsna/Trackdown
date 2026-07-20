@@ -63,6 +63,10 @@ func main() {
 		if err := backup(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "service":
+		if err := serviceCommand(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -76,6 +80,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  -retention-days > 0 deletes events older than that many days, checked once at startup and then daily; 0 (default) disables retention entirely")
 	fmt.Fprintln(os.Stderr, "       trackdown gc -db trackdown.db -retention-days N     one-shot cleanup for external cron/Task Scheduler")
 	fmt.Fprintln(os.Stderr, "       trackdown backup -db trackdown.db <dest-path>       consistent point-in-time backup via VACUUM INTO")
+	fmt.Fprintln(os.Stderr, "       trackdown service install [serve flags...]          Windows only: register as a native service (auto-detected when SCM-launched)")
+	fmt.Fprintln(os.Stderr, "       trackdown service uninstall|start|stop              Windows only: manage the installed service")
 }
 
 func serve(args []string) error {
@@ -169,8 +175,14 @@ func serve(args []string) error {
 		IdleTimeout:       idleTimeout,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	// A plain cancelable context, not signal.NotifyContext directly: the
+	// background loops below need to stop on shutdown regardless of *which*
+	// mechanism triggers it (an OS signal in the foreground case, or an SCM
+	// stop/shutdown control request when running as a Windows service), so
+	// both paths cancel this same context rather than each wiring the loops
+	// separately.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	if *retentionDays > 0 {
 		go runRetentionLoop(ctx, st, logger, time.Duration(*retentionDays)*24*time.Hour)
@@ -189,16 +201,26 @@ func serve(args []string) error {
 		serveErr <- srv.ListenAndServe()
 	}()
 
+	if isService, err := isWindowsService(); err != nil {
+		logger.Warn("could not determine whether running as a Windows service; assuming not", "error", err)
+	} else if isService {
+		return runAsService(ctx, cancel, srv, serveErr, shutdownTimeout, logger)
+	}
+
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	select {
 	case err := <-serveErr:
 		if err != nil && err != http.ErrServerClosed {
 			return err
 		}
 		return nil
-	case <-ctx.Done():
+	case <-sigCtx.Done():
+		cancel()
 		logger.Info("shutting down")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
+		shutdownCtx, sc := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer sc()
 		return srv.Shutdown(shutdownCtx)
 	}
 }

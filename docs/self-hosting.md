@@ -2,11 +2,26 @@
 
 Trackdown is a single static binary with no external service dependencies — self-hosting never requires Docker or a container orchestrator. This page covers running it as a persistent service on each major platform.
 
-**Scope note:** these are documented, well-understood mechanisms (NSSM/Task Scheduler on Windows, `systemd` on Linux, `launchd` on macOS) driving Trackdown's own graceful shutdown (it already handles `SIGINT`/service-stop signals cleanly via `signal.NotifyContext`). Native Windows Service integration (`golang.org/x/sys/svc`, where the binary speaks the Windows Service Control Manager protocol directly) is a deliberately deferred fast-follow, not something v1 needs — NSSM already gets you real service semantics (auto-start, auto-restart, proper stop signaling) without it.
+**Scope note:** on Linux and macOS, these are documented, well-understood mechanisms (`systemd`, `launchd`) driving Trackdown's own graceful shutdown (it already handles `SIGINT`/service-stop signals cleanly via `signal.NotifyContext`). On Windows, Trackdown registers itself directly with the Service Control Manager — no external tool required (see below); NSSM remains documented as an alternative for operators who specifically want its process-supervision behavior (auto-restart on crash), which a bare native service doesn't provide on its own.
 
-## Windows (NSSM)
+## Windows (native service)
 
-[NSSM](https://nssm.cc/) wraps any executable as a proper Windows Service — auto-start, auto-restart on crash, and clean stop signaling (which Trackdown's existing graceful shutdown handles correctly).
+Trackdown can register itself as a real Windows service directly — no NSSM or other wrapper needed. `trackdown serve` auto-detects when it's been launched by the Service Control Manager (`svc.IsWindowsService()`) and switches into service mode transparently; the same graceful-shutdown path (context cancellation → `srv.Shutdown` with a bounded timeout) handles both an OS signal in the foreground and an SCM stop/shutdown control request identically.
+
+```powershell
+# Run as Administrator. Pass whatever flags you'd give `trackdown serve` directly.
+trackdown service install -addr :8080 -db C:\ProgramData\Trackdown\trackdown.db
+trackdown service start
+```
+
+Set `TRACKDOWN_ADMIN_PASSWORD` as a real system/service environment variable (System Properties → Environment Variables, or `setx /M`) before starting the service — flags aren't the right place for it (visible via Task Manager), and the SCM doesn't read a `.env` file the way systemd's `EnvironmentFile=` does.
+
+```powershell
+trackdown service stop
+trackdown service uninstall
+```
+
+**Alternative — NSSM**: if you want NSSM's own process supervision (e.g. auto-restart if Trackdown itself crashes, which the native service above does not add on its own — the SCM only restarts a service if you've separately configured its recovery actions), [NSSM](https://nssm.cc/) wraps the binary the same way:
 
 ```powershell
 nssm install Trackdown "C:\Program Files\Trackdown\trackdown.exe" serve -addr :8080 -db C:\ProgramData\Trackdown\trackdown.db
@@ -17,9 +32,11 @@ nssm set Trackdown Start SERVICE_AUTO_START
 nssm start Trackdown
 ```
 
-To stop/restart: `nssm stop Trackdown`, `nssm restart Trackdown`. To uninstall: `nssm remove Trackdown confirm`.
+To stop/restart: `nssm stop Trackdown`, `nssm restart Trackdown`. To uninstall: `nssm remove Trackdown confirm`. Don't run both the native service and an NSSM-wrapped instance at once — pick one.
 
-**Alternative — Task Scheduler** (no extra tool download, but weaker service semantics): create a task triggered "At startup," action = the `trackdown.exe` path with your arguments, and check "Restart on failure" in the task's Settings tab. NSSM is the better choice if you can install it; Task Scheduler works if you'd rather not.
+**Alternative — Task Scheduler** (no extra tool download, but weaker service semantics than either of the above): create a task triggered "At startup," action = the `trackdown.exe` path with your arguments, and check "Restart on failure" in the task's Settings tab.
+
+**Testing note:** the native-service control-loop logic (translating SCM stop/shutdown requests into graceful shutdown) is unit-tested (`cmd/trackdown/service_windows_test.go`) without needing an actual SCM, and the install/uninstall/start/stop commands were verified to fail with a clear, actionable error when not run elevated (`Access is denied` → "try running as Administrator"). The full install→start→stop→uninstall lifecycle against a real, running SCM has not been verified in this development environment specifically (it lacks Administrator rights) — if you hit anything unexpected running it for real, please report it.
 
 ## Linux (systemd)
 

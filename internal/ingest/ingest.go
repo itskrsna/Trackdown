@@ -143,6 +143,8 @@ func (h *Handler) Register(mux *http.ServeMux, wrapManagement func(http.Handler)
 	mux.Handle("POST /api/{project_id}/issues/{issue_id}/resolve", wrapManagement(h.setIssueStatus(store.StatusResolved)))
 	mux.Handle("POST /api/{project_id}/issues/{issue_id}/ignore", wrapManagement(h.setIssueStatus(store.StatusIgnored)))
 	mux.Handle("POST /api/{project_id}/issues/{issue_id}/reopen", wrapManagement(h.setIssueStatus(store.StatusUnresolved)))
+	mux.Handle("POST /api/{project_id}/releases", wrapManagement(http.HandlerFunc(h.CreateRelease)))
+	mux.Handle("POST /api/{project_id}/releases/{version}/artifacts", wrapManagement(http.HandlerFunc(h.UploadArtifact)))
 }
 
 // ServeEnvelope accepts a Sentry envelope for a project, extracting and

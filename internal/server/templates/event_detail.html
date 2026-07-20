@@ -3,17 +3,21 @@
 <h1>Event {{.Stored.EventID}}</h1>
 <p class="muted">{{fmtTime .Stored.ReceivedAt}} &middot; {{.Stored.Level}} &middot; {{.Stored.Platform}}</p>
 
-{{if .Event.Exception}}
+{{if .Exceptions}}
 <h2>Exception</h2>
-{{range .Event.Exception}}
+{{range .Exceptions}}
 <div class="exception">
 	<h3>{{.Type}}{{if .Value}}: {{.Value}}{{end}}</h3>
-	{{if .Stacktrace}}
+	{{if .Frames}}
 	<ol class="stacktrace">
-		{{range .Stacktrace.Frames}}
+		{{range .Frames}}
 		<li class="{{frameClass .}}">
 			<span class="frame-location">{{.Module}} in {{.Function}}</span>
-			{{if .Filename}}<span class="frame-file">{{.Filename}}:{{.Lineno}}</span>{{end}}
+			{{if .Filename}}<span class="frame-file">{{.Filename}}:{{.Lineno}}{{if .Colno}}:{{.Colno}}{{end}}</span>{{end}}
+			{{if .Symbolicated}}
+			<span class="badge badge-symbolicated" title="Resolved via uploaded sourcemap">symbolicated</span>
+			<span class="frame-original">{{.OrigFile}}:{{.OrigLine}}:{{.OrigColumn}}{{if .OrigFunction}} in {{.OrigFunction}}{{end}}</span>
+			{{end}}
 			{{if .ContextLine}}<pre class="frame-context">{{.ContextLine}}</pre>{{end}}
 		</li>
 		{{end}}

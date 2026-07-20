@@ -84,6 +84,23 @@ CREATE TABLE IF NOT EXISTS alert_outbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alert_outbox_due ON alert_outbox(status, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS releases (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	project_id TEXT NOT NULL REFERENCES projects(id),
+	version TEXT NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(project_id, version)
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	release_id INTEGER NOT NULL REFERENCES releases(id),
+	abs_path TEXT NOT NULL,
+	sourcemap_content BLOB NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(release_id, abs_path)
+);
 `
 
 // readerPoolSize is the reader connection pool's fixed size. Not
@@ -744,4 +761,57 @@ func scanOutboxEntry(row rowScanner) (*OutboxEntry, error) {
 	e.NextAttemptAt = nextAttemptAt
 	e.CreatedAt = createdAt
 	return &e, nil
+}
+
+// CreateRelease ensures a release row exists for (projectID, version),
+// returning its ID. Idempotent — re-uploading artifacts for an
+// already-known release (CI re-runs, additional files uploaded
+// incrementally) is a normal workflow, not an error condition, so a second
+// call for the same (projectID, version) returns the existing release's ID
+// rather than failing on the UNIQUE constraint.
+func (s *Store) CreateRelease(ctx context.Context, projectID, version string) (int64, error) {
+	var id int64
+	err := s.writeDB.QueryRowContext(ctx,
+		`INSERT INTO releases (project_id, version) VALUES (?, ?)
+		 ON CONFLICT(project_id, version) DO UPDATE SET version = excluded.version
+		 RETURNING id`,
+		projectID, version).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("creating release %q for project %q: %w", version, projectID, err)
+	}
+	return id, nil
+}
+
+// UploadArtifact stores (or replaces) a sourcemap file for a release, keyed
+// by its abs_path — the same absolute URL a stack frame's AbsPath field
+// references, which is how FindArtifact looks it back up at symbolication
+// time.
+func (s *Store) UploadArtifact(ctx context.Context, releaseID int64, absPath string, sourcemapContent []byte) error {
+	_, err := s.writeDB.ExecContext(ctx,
+		`INSERT INTO artifacts (release_id, abs_path, sourcemap_content) VALUES (?, ?, ?)
+		 ON CONFLICT(release_id, abs_path) DO UPDATE SET sourcemap_content = excluded.sourcemap_content, created_at = CURRENT_TIMESTAMP`,
+		releaseID, absPath, sourcemapContent)
+	if err != nil {
+		return fmt.Errorf("uploading artifact %q for release %d: %w", absPath, releaseID, err)
+	}
+	return nil
+}
+
+// FindArtifact looks up a sourcemap by project, release version, and the
+// frame's abs_path. Returns sql.ErrNoRows when no matching release/artifact
+// exists — the common case for any event ingested before its sourcemaps
+// were uploaded (or for a release/path that was simply never uploaded), so
+// callers must treat that as "nothing to resolve, render the raw frame,"
+// never as an error worth surfacing to a user.
+func (s *Store) FindArtifact(ctx context.Context, projectID, version, absPath string) ([]byte, error) {
+	var content []byte
+	err := s.readDB.QueryRowContext(ctx,
+		`SELECT a.sourcemap_content FROM artifacts a
+		 JOIN releases r ON r.id = a.release_id
+		 WHERE r.project_id = ? AND r.version = ? AND a.abs_path = ?`,
+		projectID, version, absPath).Scan(&content)
+	if err != nil {
+		return nil, err
+	}
+	return content, nil
 }

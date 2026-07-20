@@ -33,7 +33,7 @@ var pageNames = []string{"home", "setup", "issues_list", "issue_detail", "event_
 var funcMap = template.FuncMap{
 	"relTime": func(t time.Time) string { return humanize.Time(t) },
 	"fmtTime": func(t time.Time) string { return t.Format("2006-01-02 15:04:05 MST") },
-	"frameClass": func(f protocol.Frame) string {
+	"frameClass": func(f displayFrame) string {
 		if f.InApp {
 			return "frame-in-app"
 		}

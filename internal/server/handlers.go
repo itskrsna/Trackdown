@@ -180,10 +180,11 @@ func (s *Server) handleEventDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.templates.render(w, http.StatusOK, "event_detail", eventDetailPage{
-		ProjectID: projectID,
-		Stored:    stored,
-		Event:     parsed,
-		RawJSON:   indentJSON(stored.Payload),
+		ProjectID:  projectID,
+		Stored:     stored,
+		Event:      parsed,
+		Exceptions: s.buildDisplayExceptions(r.Context(), projectID, parsed),
+		RawJSON:    indentJSON(stored.Payload),
 	})
 }
 

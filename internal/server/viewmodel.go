@@ -51,10 +51,11 @@ type issueDetailPage struct {
 }
 
 type eventDetailPage struct {
-	ProjectID string
-	Stored    *store.StoredEvent
-	Event     *protocol.Event
-	RawJSON   string
+	ProjectID  string
+	Stored     *store.StoredEvent
+	Event      *protocol.Event
+	Exceptions []displayException
+	RawJSON    string
 }
 
 func toIssueRow(i *store.Issue) issueRow {

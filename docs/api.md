@@ -53,6 +53,18 @@ Returns every event linked to that issue, most recently received first.
 
 Transition an issue's status. Return `204` on success, `404` if the issue doesn't exist. A new event arriving for a `resolved` issue automatically reopens it (a regression); one arriving for an `ignored` issue does not change its status.
 
+## Releases & artifacts (JS sourcemap symbolication)
+
+See [architecture/symbolication.md](architecture/symbolication.md) for the full design — this is display-only in the web UI, not fed into issue grouping.
+
+### `POST /api/{project_id}/releases`
+
+Body: `{"version": "<release-version>"}`. Registers a release, returning `{"id": <int>, "version": "<release-version>"}` with `201`. Idempotent — registering an already-known version returns the existing release rather than erroring (a CI pipeline re-running the same release is a normal occurrence). `400` if `version` is missing or the body isn't valid JSON.
+
+### `POST /api/{project_id}/releases/{version}/artifacts?abs_path=<url-encoded-abs-path>`
+
+Uploads a single sourcemap file. The request body is the **raw sourcemap file content** (not JSON) — `abs_path` must exactly match the `abs_path` a stack frame will reference (e.g. `https://your-cdn.example.com/static/app.min.js`). The release doesn't need a prior explicit `POST .../releases` call — like project auto-provisioning on envelope ingest, this creates the release if it doesn't already exist. Re-uploading the same `(version, abs_path)` replaces the stored content. Returns `204` on success, `400` if `abs_path` is missing or the body is empty, `413` if the body exceeds the 20 MiB cap.
+
 ## Operations
 
 ### `GET /healthz`

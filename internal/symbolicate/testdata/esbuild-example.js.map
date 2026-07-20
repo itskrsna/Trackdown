@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["src.js"],
+  "sourcesContent": ["function computeTotal(itemPrices) {\n  let total = 0;\n  for (const price of itemPrices) {\n    total = total + price;\n  }\n  return total;\n}\n\nfunction applyDiscount(total, discountPercent) {\n  const discount = total * (discountPercent / 100);\n  return total - discount;\n}\n\nfunction checkout(itemPrices, discountPercent) {\n  const total = computeTotal(itemPrices);\n  const finalTotal = applyDiscount(total, discountPercent);\n  if (finalTotal < 0) {\n    throw new Error(\"checkout total went negative\");\n  }\n  return finalTotal;\n}\n\nmodule.exports = { computeTotal, applyDiscount, checkout };\n"],
+  "mappings": "AAAA,SAAS,aAAaA,EAAY,CAChC,IAAIC,EAAQ,EACZ,UAAWC,KAASF,EAClBC,EAAQA,EAAQC,EAElB,OAAOD,CACT,CAEA,SAAS,cAAcA,EAAOE,EAAiB,CAC7C,MAAMC,EAAWH,GAASE,EAAkB,KAC5C,OAAOF,EAAQG,CACjB,CAEA,SAAS,SAASJ,EAAYG,EAAiB,CAC7C,MAAMF,EAAQ,aAAaD,CAAU,EAC/BK,EAAa,cAAcJ,EAAOE,CAAe,EACvD,GAAIE,EAAa,EACf,MAAM,IAAI,MAAM,8BAA8B,EAEhD,OAAOA,CACT,CAEA,OAAO,QAAU,CAAE,aAAc,cAAe,QAAS",
+  "names": ["itemPrices", "total", "price", "discountPercent", "discount", "finalTotal"]
+}

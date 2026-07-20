@@ -29,6 +29,7 @@ Given a set of frames, three things are normalized before they become part of th
 - No custom user-supplied fingerprints (Sentry SDKs can send a `fingerprint` field to override grouping — not read yet)
 - No "generated code" / minified-frame detection
 - No frame-similarity heuristics for near-miss matching — grouping is exact-match on the normalized components, not fuzzy
+- **Sourcemap-resolved (original, non-minified) function names are not used for grouping, even when a frame has been successfully symbolicated for display** (see `docs/architecture/symbolication.md`). Fingerprinting still operates on the raw minified `(module, function)` pair. This is a deliberate v1 scope line, not an oversight: feeding resolved names into the fingerprint would retroactively change fingerprints for issues that were grouped before their sourcemaps existed, silently splitting or merging existing issues — a data-migration-shaped problem, not a simple feature addition. Symbolication in this version is display-only.
 
 ## Storage integration
 

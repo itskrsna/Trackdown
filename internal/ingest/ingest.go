@@ -82,15 +82,34 @@ func (h *Handler) logger() *slog.Logger {
 
 // notifyAsync delivers a notification in the background with a bounded
 // timeout, using a fresh context (not the request's, which is canceled the
-// moment the HTTP response is written) — best-effort, no retry queue: a
-// slow or unreachable notifier must never block or fail the SDK's ingest
-// request. Delivery failures are logged, not surfaced to the SDK.
+// moment the HTTP response is written) — a slow or unreachable notifier must
+// never block or fail the SDK's ingest request. This first attempt is
+// still best-effort and unblocking; a failure here is persisted to the
+// alert_outbox table so cmd/trackdown's background retry loop can redeliver
+// it later, rather than being silently dropped.
 func (h *Handler) notifyAsync(ev alert.NotifyEvent) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 		defer cancel()
 		if err := h.Notifier.Notify(ctx, ev); err != nil {
-			h.logger().Error("alert delivery failed", "error", err, "project_id", ev.ProjectID, "issue_id", ev.IssueID)
+			h.logger().Error("alert delivery failed, enqueuing for retry", "error", err, "project_id", ev.ProjectID, "issue_id", ev.IssueID)
+			entry := store.OutboxEntry{
+				ProjectID:    ev.ProjectID,
+				IssueID:      ev.IssueID,
+				Title:        ev.Title,
+				Level:        ev.Level,
+				IsNew:        ev.IsNew,
+				IsRegression: ev.IsRegression,
+				EventCount:   ev.EventCount,
+				OccurredAt:   ev.OccurredAt,
+			}
+			// Use a fresh context here too: the notify ctx above may already
+			// be near its deadline after a slow failed delivery attempt.
+			enqueueCtx, enqueueCancel := context.WithTimeout(context.Background(), notifyTimeout)
+			defer enqueueCancel()
+			if _, enqueueErr := h.Store.EnqueueAlert(enqueueCtx, entry, err); enqueueErr != nil {
+				h.logger().Error("enqueuing alert for retry failed", "error", enqueueErr, "project_id", ev.ProjectID, "issue_id", ev.IssueID)
+			}
 		}
 	}()
 }

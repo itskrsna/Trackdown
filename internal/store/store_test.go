@@ -573,9 +573,9 @@ func TestDeleteOldEvents_RemovesOnlyOldEvents(t *testing.T) {
 	}
 
 	// SaveEvent always stamps received_at with CURRENT_TIMESTAMP -- backdate
-	// directly (tests are in-package, so s.db is accessible) since that's
-	// the only way to deterministically exercise a retention cutoff.
-	if _, err := s.db.ExecContext(ctx,
+	// directly (tests are in-package, so s.writeDB is accessible) since
+	// that's the only way to deterministically exercise a retention cutoff.
+	if _, err := s.writeDB.ExecContext(ctx,
 		`UPDATE events SET received_at = ? WHERE event_id = ?`,
 		time.Now().Add(-30*24*time.Hour), oldEv.EventID); err != nil {
 		t.Fatalf("backdating old event: %v", err)

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -64,52 +65,134 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_project_received ON events(project_id, received_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_events_issue ON events(issue_id, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS alert_outbox (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	project_id TEXT NOT NULL,
+	issue_id INTEGER NOT NULL,
+	title TEXT NOT NULL DEFAULT '',
+	level TEXT NOT NULL DEFAULT '',
+	is_new INTEGER NOT NULL DEFAULT 0,
+	is_regression INTEGER NOT NULL DEFAULT 0,
+	event_count INTEGER NOT NULL DEFAULT 0,
+	occurred_at DATETIME NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	attempts INTEGER NOT NULL DEFAULT 0,
+	next_attempt_at DATETIME NOT NULL,
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_error TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_outbox_due ON alert_outbox(status, next_attempt_at);
 `
 
+// readerPoolSize is the reader connection pool's fixed size. Not
+// user-configurable in v1 -- there's no evidence yet of needing that knob,
+// and adding one before real usage data justifies it would be speculative.
+const readerPoolSize = 4
+
+// memoryDBCounter gives each ":memory:" Store its own uniquely-named
+// shared-cache in-memory database (see the comment in Open for why this
+// matters), so concurrent tests using ":memory:" never collide with each
+// other.
+var memoryDBCounter atomic.Int64
+
 // Store wraps a SQLite database holding all of Trackdown's persisted state.
+// Reads and writes go through separate *sql.DB pools so concurrent web-UI
+// reads don't serialize behind ingest writes (see the WAL mode comment in
+// Open) -- but both point at the exact same underlying database, so every
+// method's behavior is identical to a single shared connection as far as
+// callers can tell.
 type Store struct {
-	db *sql.DB
+	writeDB *sql.DB
+	readDB  *sql.DB
 }
 
 // Open opens (creating if necessary) a SQLite database at path and applies
 // the schema. path may be ":memory:" for an ephemeral in-process database,
 // as used in tests.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := path
+	if path == ":memory:" {
+		// A bare ":memory:" DSN gives every *sql.DB connection its own
+		// independent, unshared in-memory database -- fine for the old
+		// single-connection design, but readDB and writeDB below are two
+		// separate connection pools that need to see the same data. SQLite's
+		// shared-cache URI form makes multiple connections share one named
+		// in-memory database; the counter keeps concurrent Store instances
+		// (e.g. parallel tests) from colliding on the same shared name.
+		dsn = fmt.Sprintf("file:trackdown-memory-%d?mode=memory&cache=shared", memoryDBCounter.Add(1))
+	}
+
+	writeDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening database %q: %w", path, err)
 	}
-	// SQLite serializes writers regardless; a single shared connection avoids
-	// "database is locked" errors under concurrent ingest without requiring
-	// WAL-mode tuning yet (a later performance milestone, not a v1 concern).
-	db.SetMaxOpenConns(1)
+	// SQLite serializes writers regardless of how many connections ask for
+	// one; a single shared write connection avoids "database is locked"
+	// errors under concurrent ingest.
+	writeDB.SetMaxOpenConns(1)
 
-	// A defensive one-liner regardless of the single-connection setup above:
-	// if a query ever does contend (e.g. a future WAL/multi-connection
-	// change), wait up to 5s for the lock instead of failing immediately
-	// with "database is locked."
-	if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("setting busy_timeout: %w", err)
+	readDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		writeDB.Close()
+		return nil, fmt.Errorf("opening database %q (reader pool): %w", path, err)
+	}
+	readDB.SetMaxOpenConns(readerPoolSize)
+
+	// busy_timeout on both: if a query ever does contend (WAL still allows a
+	// writer and readers to briefly race a page), wait up to 5s for the lock
+	// instead of failing immediately with "database is locked."
+	for _, db := range []*sql.DB{writeDB, readDB} {
+		if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+			writeDB.Close()
+			readDB.Close()
+			return nil, fmt.Errorf("setting busy_timeout: %w", err)
+		}
 	}
 
-	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+	// WAL mode is what actually lets readDB's connections read concurrently
+	// with an in-flight write on writeDB, rather than blocking behind it (the
+	// default rollback-journal mode takes a database-wide lock for the
+	// duration of a write). It's a property of the database file itself, so
+	// setting it once via either connection is enough, but every reader
+	// still needs its own busy_timeout above for the brief windows WAL
+	// doesn't fully avoid (e.g. a writer mid-checkpoint).
+	if _, err := writeDB.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		writeDB.Close()
+		readDB.Close()
+		return nil, fmt.Errorf("enabling WAL mode: %w", err)
+	}
+
+	if _, err := writeDB.Exec(schema); err != nil {
+		writeDB.Close()
+		readDB.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{writeDB: writeDB, readDB: readDB}, nil
 }
 
-// Close closes the underlying database connection.
+// Close closes both underlying database connection pools.
 func (s *Store) Close() error {
-	return s.db.Close()
+	writeErr := s.writeDB.Close()
+	readErr := s.readDB.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return readErr
 }
 
-// Ping verifies the database connection is alive, for use by a health-check
-// endpoint.
+// Ping verifies both database connection pools are alive, for use by a
+// health-check endpoint.
 func (s *Store) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
+	if err := s.writeDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping (writer): %w", err)
+	}
+	if err := s.readDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping (reader): %w", err)
+	}
+	return nil
 }
 
 // BackupTo writes a consistent point-in-time snapshot of the database to
@@ -118,7 +201,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // running, with no risk of the torn/inconsistent snapshot a raw file copy
 // could produce if something writes mid-copy.
 func (s *Store) BackupTo(ctx context.Context, destPath string) error {
-	if _, err := s.db.ExecContext(ctx, `VACUUM INTO ?`, destPath); err != nil {
+	if _, err := s.writeDB.ExecContext(ctx, `VACUUM INTO ?`, destPath); err != nil {
 		return fmt.Errorf("backing up to %q: %w", destPath, err)
 	}
 	return nil
@@ -135,7 +218,7 @@ func (s *Store) BackupTo(ctx context.Context, destPath string) error {
 // the issue existed.
 func (s *Store) DeleteOldEvents(ctx context.Context, olderThan time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-olderThan)
-	res, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE received_at < ?`, cutoff)
+	res, err := s.writeDB.ExecContext(ctx, `DELETE FROM events WHERE received_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("deleting events older than %s: %w", olderThan, err)
 	}
@@ -151,7 +234,7 @@ func (s *Store) DeleteOldEvents(ctx context.Context, olderThan time.Duration) (i
 // moment its DSN is configured in an SDK, without a separate provisioning
 // step. An existing project's public key is left untouched.
 func (s *Store) EnsureProject(ctx context.Context, id, publicKey string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.writeDB.ExecContext(ctx,
 		`INSERT INTO projects (id, public_key) VALUES (?, ?)
 		 ON CONFLICT(id) DO NOTHING`,
 		id, publicKey)
@@ -165,7 +248,7 @@ func (s *Store) EnsureProject(ctx context.Context, id, publicKey string) error {
 // sql.ErrNoRows if the project doesn't exist.
 func (s *Store) ProjectPublicKey(ctx context.Context, projectID string) (string, error) {
 	var key string
-	err := s.db.QueryRowContext(ctx,
+	err := s.readDB.QueryRowContext(ctx,
 		`SELECT public_key FROM projects WHERE id = ?`, projectID).Scan(&key)
 	if err != nil {
 		return "", err
@@ -187,13 +270,13 @@ const projectColumns = `id, public_key, name, created_at`
 // GetProject looks up a single project by ID. It returns sql.ErrNoRows if
 // no such project exists.
 func (s *Store) GetProject(ctx context.Context, id string) (*Project, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = ?`, id)
+	row := s.readDB.QueryRowContext(ctx, `SELECT `+projectColumns+` FROM projects WHERE id = ?`, id)
 	return scanProject(row)
 }
 
 // ListProjects returns every project, most recently created first.
 func (s *Store) ListProjects(ctx context.Context) ([]*Project, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+projectColumns+` FROM projects ORDER BY created_at DESC, id DESC`)
+	rows, err := s.readDB.QueryContext(ctx, `SELECT `+projectColumns+` FROM projects ORDER BY created_at DESC, id DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("listing projects: %w", err)
 	}
@@ -240,7 +323,7 @@ func scanProject(row rowScanner) (*Project, error) {
 // Callers (alerting) use issueID/isNew/isRegression to decide when and
 // about what to notify.
 func (s *Store) SaveEvent(ctx context.Context, projectID string, ev *protocol.Event, raw []byte, fingerprint, title string) (issueID int64, isNew, isRegression bool, err error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.writeDB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, false, false, fmt.Errorf("beginning transaction: %w", err)
 	}
@@ -331,7 +414,7 @@ const eventColumns = `event_id, issue_id, received_at, event_timestamp, level, p
 // GetEvent looks up a single event by its Sentry event_id within a project.
 // It returns sql.ErrNoRows if no such event exists.
 func (s *Store) GetEvent(ctx context.Context, projectID, eventID string) (*StoredEvent, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.readDB.QueryRowContext(ctx,
 		`SELECT `+eventColumns+` FROM events WHERE project_id = ? AND event_id = ?`,
 		projectID, eventID)
 	return scanEvent(row)
@@ -339,7 +422,7 @@ func (s *Store) GetEvent(ctx context.Context, projectID, eventID string) (*Store
 
 // ListEvents returns all events for a project, most recently received first.
 func (s *Store) ListEvents(ctx context.Context, projectID string) ([]*StoredEvent, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.readDB.QueryContext(ctx,
 		`SELECT `+eventColumns+` FROM events WHERE project_id = ? ORDER BY received_at DESC, id DESC`,
 		projectID)
 	if err != nil {
@@ -361,7 +444,7 @@ func (s *Store) ListEvents(ctx context.Context, projectID string) ([]*StoredEven
 // ListEventsByIssue returns every event linked to a specific issue, most
 // recently received first.
 func (s *Store) ListEventsByIssue(ctx context.Context, projectID string, issueID int64) ([]*StoredEvent, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.readDB.QueryContext(ctx,
 		`SELECT `+eventColumns+` FROM events WHERE project_id = ? AND issue_id = ? ORDER BY received_at DESC, id DESC`,
 		projectID, issueID)
 	if err != nil {
@@ -432,7 +515,7 @@ const issueColumns = `id, fingerprint, title, status, first_seen, last_seen, eve
 // GetIssue looks up a single issue by ID within a project. It returns
 // sql.ErrNoRows if no such issue exists.
 func (s *Store) GetIssue(ctx context.Context, projectID string, issueID int64) (*Issue, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.readDB.QueryRowContext(ctx,
 		`SELECT `+issueColumns+` FROM issues WHERE project_id = ? AND id = ?`,
 		projectID, issueID)
 	return scanIssue(row)
@@ -440,7 +523,7 @@ func (s *Store) GetIssue(ctx context.Context, projectID string, issueID int64) (
 
 // ListIssues returns every issue for a project, most recently active first.
 func (s *Store) ListIssues(ctx context.Context, projectID string) ([]*Issue, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.readDB.QueryContext(ctx,
 		`SELECT `+issueColumns+` FROM issues WHERE project_id = ? ORDER BY last_seen DESC, id DESC`,
 		projectID)
 	if err != nil {
@@ -463,7 +546,7 @@ func (s *Store) ListIssues(ctx context.Context, projectID string) ([]*Issue, err
 // ignore, or reopen by setting StatusUnresolved directly). It returns
 // sql.ErrNoRows if no such issue exists in the project.
 func (s *Store) SetIssueStatus(ctx context.Context, projectID string, issueID int64, status IssueStatus) error {
-	res, err := s.db.ExecContext(ctx,
+	res, err := s.writeDB.ExecContext(ctx,
 		`UPDATE issues SET status = ? WHERE project_id = ? AND id = ?`,
 		string(status), projectID, issueID)
 	if err != nil {
@@ -497,4 +580,168 @@ func scanIssue(row rowScanner) (*Issue, error) {
 		issue.Level = level.String
 	}
 	return &issue, nil
+}
+
+// alertBackoffSchedule gives the wait duration before each successive retry
+// attempt (index 0 = wait after the 1st failure, etc.), capping at its last
+// entry rather than growing unbounded. alertMaxAttempts bounds total retries
+// before an entry is dead-lettered (kept in the table for inspection, never
+// silently deleted, but no longer picked up by DueAlerts).
+var alertBackoffSchedule = []time.Duration{
+	1 * time.Minute,
+	5 * time.Minute,
+	30 * time.Minute,
+	2 * time.Hour,
+	12 * time.Hour,
+}
+
+const alertMaxAttempts = 8
+
+func alertBackoff(attempts int) time.Duration {
+	idx := attempts - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(alertBackoffSchedule) {
+		idx = len(alertBackoffSchedule) - 1
+	}
+	return alertBackoffSchedule[idx]
+}
+
+// OutboxStatus is an alert_outbox entry's delivery state.
+type OutboxStatus string
+
+const (
+	OutboxPending   OutboxStatus = "pending"
+	OutboxDelivered OutboxStatus = "delivered"
+	OutboxDead      OutboxStatus = "dead"
+)
+
+// OutboxEntry is a durable record of an alert delivery that failed at least
+// once and needs retrying — the persistent counterpart to the immediate,
+// best-effort notification attempt in internal/ingest. Field names
+// deliberately mirror internal/alert.NotifyEvent's shape; store doesn't
+// import internal/alert directly (keeping store's dependency graph exactly
+// as documented — it depends only on protocol), so callers convert between
+// the two.
+type OutboxEntry struct {
+	ID            int64
+	ProjectID     string
+	IssueID       int64
+	Title         string
+	Level         string
+	IsNew         bool
+	IsRegression  bool
+	EventCount    int64
+	OccurredAt    time.Time
+	Status        OutboxStatus
+	Attempts      int
+	NextAttemptAt time.Time
+	CreatedAt     time.Time
+	LastError     string
+}
+
+// EnqueueAlert persists an alert delivery that just failed its first
+// (immediate, best-effort) attempt, so a background retry loop can pick it
+// up later. lastErr is recorded for operator visibility.
+func (s *Store) EnqueueAlert(ctx context.Context, e OutboxEntry, lastErr error) (int64, error) {
+	errMsg := ""
+	if lastErr != nil {
+		errMsg = lastErr.Error()
+	}
+	nextAttemptAt := time.Now().UTC().Add(alertBackoff(1))
+	res, err := s.writeDB.ExecContext(ctx,
+		`INSERT INTO alert_outbox
+		 (project_id, issue_id, title, level, is_new, is_regression, event_count, occurred_at, status, attempts, next_attempt_at, last_error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ProjectID, e.IssueID, e.Title, e.Level, e.IsNew, e.IsRegression, e.EventCount, e.OccurredAt.UTC(),
+		string(OutboxPending), 1, nextAttemptAt, errMsg)
+	if err != nil {
+		return 0, fmt.Errorf("enqueuing alert for issue %d: %w", e.IssueID, err)
+	}
+	return res.LastInsertId()
+}
+
+const outboxColumns = `id, project_id, issue_id, title, level, is_new, is_regression, event_count, occurred_at, status, attempts, next_attempt_at, created_at, last_error`
+
+// DueAlerts returns pending outbox entries whose next_attempt_at has passed,
+// oldest first, up to limit.
+func (s *Store) DueAlerts(ctx context.Context, now time.Time, limit int) ([]*OutboxEntry, error) {
+	rows, err := s.readDB.QueryContext(ctx,
+		`SELECT `+outboxColumns+` FROM alert_outbox
+		 WHERE status = ? AND next_attempt_at <= ?
+		 ORDER BY next_attempt_at ASC, id ASC
+		 LIMIT ?`,
+		string(OutboxPending), now.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("listing due alerts: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*OutboxEntry
+	for rows.Next() {
+		e, err := scanOutboxEntry(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// MarkAlertDelivered marks an outbox entry as successfully delivered.
+func (s *Store) MarkAlertDelivered(ctx context.Context, id int64) error {
+	_, err := s.writeDB.ExecContext(ctx,
+		`UPDATE alert_outbox SET status = ? WHERE id = ?`, string(OutboxDelivered), id)
+	if err != nil {
+		return fmt.Errorf("marking alert %d delivered: %w", id, err)
+	}
+	return nil
+}
+
+// MarkAlertFailed records another failed delivery attempt: bumps the
+// attempt count, and either schedules the next retry via alertBackoff or,
+// past alertMaxAttempts, dead-letters the entry (kept for inspection, never
+// retried again, never deleted).
+func (s *Store) MarkAlertFailed(ctx context.Context, id int64, attempts int, lastErr error) error {
+	errMsg := ""
+	if lastErr != nil {
+		errMsg = lastErr.Error()
+	}
+	if attempts >= alertMaxAttempts {
+		_, err := s.writeDB.ExecContext(ctx,
+			`UPDATE alert_outbox SET status = ?, attempts = ?, last_error = ? WHERE id = ?`,
+			string(OutboxDead), attempts, errMsg, id)
+		if err != nil {
+			return fmt.Errorf("dead-lettering alert %d: %w", id, err)
+		}
+		return nil
+	}
+	nextAttemptAt := time.Now().UTC().Add(alertBackoff(attempts))
+	_, err := s.writeDB.ExecContext(ctx,
+		`UPDATE alert_outbox SET attempts = ?, next_attempt_at = ?, last_error = ? WHERE id = ?`,
+		attempts, nextAttemptAt, errMsg, id)
+	if err != nil {
+		return fmt.Errorf("updating alert %d after failed retry: %w", id, err)
+	}
+	return nil
+}
+
+func scanOutboxEntry(row rowScanner) (*OutboxEntry, error) {
+	var (
+		e             OutboxEntry
+		status        string
+		occurredAt    time.Time
+		nextAttemptAt time.Time
+		createdAt     time.Time
+	)
+	if err := row.Scan(&e.ID, &e.ProjectID, &e.IssueID, &e.Title, &e.Level, &e.IsNew, &e.IsRegression,
+		&e.EventCount, &occurredAt, &status, &e.Attempts, &nextAttemptAt, &createdAt, &e.LastError); err != nil {
+		return nil, err
+	}
+	e.Status = OutboxStatus(status)
+	e.OccurredAt = occurredAt
+	e.NextAttemptAt = nextAttemptAt
+	e.CreatedAt = createdAt
+	return &e, nil
 }

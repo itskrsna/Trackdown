@@ -3,6 +3,7 @@ package ingest
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,16 @@ import (
 	"github.com/itskrsna/Trackdown/internal/alert"
 	"github.com/itskrsna/Trackdown/internal/store"
 )
+
+// failingNotifier always fails, so tests can prove a failed delivery gets
+// persisted to the alert_outbox for retry rather than silently dropped.
+type failingNotifier struct {
+	err error
+}
+
+func (f *failingNotifier) Notify(_ context.Context, _ alert.NotifyEvent) error {
+	return f.err
+}
 
 // recordingNotifier captures alert.NotifyEvent calls onto a channel, since
 // notifyAsync fires in a background goroutine -- tests must wait for a
@@ -138,6 +149,55 @@ func TestServeEnvelope_SecondDistinctOccurrence_DoesNotRenotify(t *testing.T) {
 
 	postEnvelopeTo(t, srv.URL+"/api/proj1/envelope/", syntheticEnvelopeWithEventID(t, "occurrence-2"))
 	notifier.expectNoCall(t, 300*time.Millisecond)
+}
+
+func TestServeEnvelope_NotifierFails_EnqueuesForRetry(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	wantErr := errors.New("smtp unreachable")
+	mux := http.NewServeMux()
+	(&Handler{Store: st, Notifier: &failingNotifier{err: wantErr}}).Register(mux, nil)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	postEnvelopeTo(t, srv.URL+"/api/proj1/envelope/", loadEnvelopeFixture(t, "sentry-go-exception.envelope"))
+
+	// notifyAsync's enqueue-on-failure runs in the same background goroutine
+	// as the failed delivery attempt; poll rather than assume it's already
+	// landed by the time the HTTP response returned.
+	ctx := context.Background()
+	deadline := time.Now().Add(2 * time.Second)
+	var due []*store.OutboxEntry
+	for time.Now().Before(deadline) {
+		due, err = st.DueAlerts(ctx, time.Now().Add(2*time.Minute), 10)
+		if err != nil {
+			t.Fatalf("DueAlerts: %v", err)
+		}
+		if len(due) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(due) != 1 {
+		t.Fatalf("len(due) = %d, want 1 (the failed delivery should have been enqueued)", len(due))
+	}
+	entry := due[0]
+	if entry.ProjectID != "proj1" || !entry.IsNew {
+		t.Fatalf("outbox entry = %+v", entry)
+	}
+	if entry.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1", entry.Attempts)
+	}
+	if entry.LastError != wantErr.Error() {
+		t.Fatalf("LastError = %q, want %q", entry.LastError, wantErr.Error())
+	}
+	if entry.Status != store.OutboxPending {
+		t.Fatalf("Status = %q, want pending", entry.Status)
+	}
 }
 
 func TestServeEnvelope_NoNotifierSet_DoesNotPanic(t *testing.T) {

@@ -176,6 +176,13 @@ func serve(args []string) error {
 		go runRetentionLoop(ctx, st, logger, time.Duration(*retentionDays)*24*time.Hour)
 	}
 
+	if notifier != nil {
+		// Unlike retention, this is always-on when alerting is configured at
+		// all -- a missed alert being silently dropped forever is a
+		// correctness gap, not an opt-in feature.
+		go runAlertRetryLoop(ctx, st, logger, notifier)
+	}
+
 	serveErr := make(chan error, 1)
 	go func() {
 		logger.Info("trackdown listening", "addr", *addr, "db", *dbPath)
@@ -220,6 +227,71 @@ func runRetentionLoop(ctx context.Context, st *store.Store, logger *slog.Logger,
 			return
 		case <-ticker.C:
 			runOnce()
+		}
+	}
+}
+
+const (
+	// alertRetryInterval is how often the outbox is polled for due retries.
+	alertRetryInterval = 30 * time.Second
+	// alertRetryBatchSize caps how many entries one tick processes, so a
+	// large backlog (e.g. after an extended SMTP outage) can't make a single
+	// tick run indefinitely.
+	alertRetryBatchSize = 20
+	// alertRetryNotifyTimeout mirrors internal/ingest's notifyTimeout for the
+	// same reason: a slow or unreachable notifier must not stall the loop.
+	alertRetryNotifyTimeout = 10 * time.Second
+)
+
+// runAlertRetryLoop periodically redelivers alert_outbox entries that failed
+// their initial best-effort delivery attempt (see internal/ingest's
+// notifyAsync) — this is what makes alert delivery eventually-consistent
+// rather than fire-and-forget: a transient SMTP/webhook outage no longer
+// means a missed alert is gone forever.
+func runAlertRetryLoop(ctx context.Context, st *store.Store, logger *slog.Logger, notifier alert.Notifier) {
+	ticker := time.NewTicker(alertRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			retryDueAlerts(ctx, st, logger, notifier)
+		}
+	}
+}
+
+func retryDueAlerts(ctx context.Context, st *store.Store, logger *slog.Logger, notifier alert.Notifier) {
+	due, err := st.DueAlerts(ctx, time.Now(), alertRetryBatchSize)
+	if err != nil {
+		logger.Error("listing due alerts failed", "error", err)
+		return
+	}
+	for _, e := range due {
+		notifyCtx, cancel := context.WithTimeout(context.Background(), alertRetryNotifyTimeout)
+		notifyErr := notifier.Notify(notifyCtx, alert.NotifyEvent{
+			ProjectID:    e.ProjectID,
+			IssueID:      e.IssueID,
+			Title:        e.Title,
+			Level:        e.Level,
+			IsNew:        e.IsNew,
+			IsRegression: e.IsRegression,
+			EventCount:   e.EventCount,
+			OccurredAt:   e.OccurredAt,
+		})
+		cancel()
+
+		if notifyErr != nil {
+			attempts := e.Attempts + 1
+			logger.Warn("alert retry failed", "outbox_id", e.ID, "attempts", attempts, "error", notifyErr)
+			if err := st.MarkAlertFailed(ctx, e.ID, attempts, notifyErr); err != nil {
+				logger.Error("marking alert retry failure failed", "error", err, "outbox_id", e.ID)
+			}
+			continue
+		}
+		logger.Info("alert retry succeeded", "outbox_id", e.ID, "attempts", e.Attempts)
+		if err := st.MarkAlertDelivered(ctx, e.ID); err != nil {
+			logger.Error("marking alert delivered failed", "error", err, "outbox_id", e.ID)
 		}
 	}
 }

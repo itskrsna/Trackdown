@@ -46,18 +46,25 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-# Explicitly disabled: goreleaser defaults to a GitHub release target even
-# with no release: section at all, which fails validation without a git
-# remote -- and this repo intentionally has none yet (private, no push,
-# per standing project policy). This must stay disabled until a future,
-# explicit decision to launch publicly changes that.
-release:
-  disable: true
+changelog:
+  # goreleaser's default git-log-based changelog. The repo's history was
+  # squashed to a single "Initial commit" before the real codebase was ever
+  # pushed (see CLAUDE.md's "Git identity & history cleanup" note), so
+  # v0.1.0's changelog is naturally just that one entry -- an accurate
+  # reflection of "this is the first release," not a bug to work around.
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
 
-# Release/publish steps are intentionally NOT configured here (no GitHub
-# release integration, no tag pushing) -- this repo stays private until an
-# explicit future decision to launch publicly. Every invocation of this
-# config must be `goreleaser release --snapshot --clean` (or `build
-# --snapshot --clean`), which never touches a remote, never creates a git
-# tag, and never publishes anything. Do not add a `release:` section or run
-# a non-snapshot release until that decision has actually been made.
+release:
+  # Publishing is now live: Kishore gave the explicit go-ahead to cut a real
+  # v0.1.0 release. Runs via .github/workflows/release.yml on a `v*` tag
+  # push, using the workflow's own GITHUB_TOKEN -- not from a local machine,
+  # so releases are reproducible from CI regardless of who/what triggers the
+  # tag push.
+  github:
+    owner: itskrsna
+    name: Trackdown
+  prerelease: auto # versions with a pre-release suffix (e.g. v0.1.0-rc1) are marked as such on GitHub

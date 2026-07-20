@@ -12,6 +12,27 @@ import (
 	"github.com/itskrsna/Trackdown/internal/store"
 )
 
+// TestVersionString_DefaultsAndStamping proves the actual gap found while
+// wiring up goreleaser for a real release: .goreleaser.yaml's ldflags
+// (-X main.version=..., etc.) silently no-op if the target variables don't
+// exist in package main -- go build reports no error either way, so a
+// release binary could ship with zero real version info without this test
+// (or the live ldflags build this was verified against) catching it.
+func TestVersionString_DefaultsAndStamping(t *testing.T) {
+	origVersion, origCommit, origDate := version, commit, date
+	t.Cleanup(func() { version, commit, date = origVersion, origCommit, origDate })
+
+	version, commit, date = "dev", "none", "unknown"
+	if got := versionString(); got != "trackdown dev (commit none, built unknown)" {
+		t.Fatalf("versionString() = %q, want the unstamped-default form", got)
+	}
+
+	version, commit, date = "v0.1.0", "abc1234", "2026-07-20"
+	if got := versionString(); got != "trackdown v0.1.0 (commit abc1234, built 2026-07-20)" {
+		t.Fatalf("versionString() = %q, want the stamped form", got)
+	}
+}
+
 func TestHealthzHandler_Healthy(t *testing.T) {
 	st, err := store.Open(":memory:")
 	if err != nil {

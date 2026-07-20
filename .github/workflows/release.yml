@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# goreleaser needs write access to create the GitHub Release and upload
+# binaries -- explicit here rather than relying on the repo's default token
+# permissions setting, which may be read-only.
+permissions:
+  contents: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, not just the tagged commit -- goreleaser's
+          # changelog generation needs it.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          # The workflow's own token, scoped to this repo by the
+          # `permissions:` block above -- no personal access token needed,
+          # so this runs the same way regardless of who or what pushes the
+          # tag (see .goreleaser.yaml's release: comment).
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -23,6 +23,16 @@ import (
 	"github.com/itskrsna/Trackdown/internal/store"
 )
 
+// version, commit, and date are stamped at build time via -ldflags (see
+// .goreleaser.yaml's builds.ldflags) -- these defaults are what `go build`/
+// `go run` without goreleaser produce, so the binary is still functional
+// (just honestly unstamped) outside a real release build.
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 const (
 	shutdownTimeout = 5 * time.Second
 
@@ -67,10 +77,16 @@ func main() {
 		if err := serviceCommand(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "version":
+		fmt.Println(versionString())
 	default:
 		usage()
 		os.Exit(2)
 	}
+}
+
+func versionString() string {
+	return fmt.Sprintf("trackdown %s (commit %s, built %s)", version, commit, date)
 }
 
 func usage() {
@@ -82,6 +98,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "       trackdown backup -db trackdown.db <dest-path>       consistent point-in-time backup via VACUUM INTO")
 	fmt.Fprintln(os.Stderr, "       trackdown service install [serve flags...]          Windows only: register as a native service (auto-detected when SCM-launched)")
 	fmt.Fprintln(os.Stderr, "       trackdown service uninstall|start|stop              Windows only: manage the installed service")
+	fmt.Fprintln(os.Stderr, "       trackdown version                                   print version, commit, and build date")
 }
 
 func serve(args []string) error {
